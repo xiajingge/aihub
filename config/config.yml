@@ -1,0 +1,22 @@
+server:
+  port: 8090
+  name: AiHub
+  base_path: ""
+  read_timeout: 30s
+  write_timeout: 30s
+  request_timeout: 30s
+  llm_request_timeout: 300s
+  debug: false
+
+db:
+  dialect: mysql
+  dsn: root:abc123@tcp(127.0.0.1:3306)/aihub?parseTime=True
+  debug: false
+
+
+logger:
+  level: info
+  encoding: json
+  output_paths:
+    - stdout
+    - logs/app.log
