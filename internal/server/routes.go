@@ -15,11 +15,12 @@ func (h *Handlers) SetupRoutes(server *Server) {
 	// TODO add middleware
 	// TODO noroute \ tracing\ metric \ jwt
 
-	apiGroup := server.Group("/v1") //middleware.WithTimeout(server.Config.LLMRequestTimeout),
-	//middleware.WithSource("api"),
+	h.setupOpenAIRoutes(server)
+	// TODO: h.setupAnthropicRoutes(server)
+	// TODO: h.setupGoogleRoutes(server)
+}
 
-	{
-		apiGroup.POST("/chat/completions", h.OpenAI.ChatCompletion)
-	}
-	// TODO authropic
+func (h *Handlers) setupOpenAIRoutes(server *Server) {
+	apiGroup := server.Group("/v1")
+	apiGroup.POST("/chat/completions", h.OpenAI.ChatCompletion)
 }

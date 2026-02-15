@@ -10,8 +10,18 @@ import (
 )
 
 type ChatCompletionSSEHandlers struct {
-	ChatCompletionProcessor *service.ChatCompletionProcessor
-	logger                  logger.LoggerV1
+	ChatCompletionService service.ChatCompletionService
+	logger                logger.LoggerV1
+}
+
+func NewChatCompletionSSEHandlers(
+	chatCompletionService service.ChatCompletionService,
+	loggerv1 logger.LoggerV1,
+) *ChatCompletionSSEHandlers {
+	return &ChatCompletionSSEHandlers{
+		ChatCompletionService: chatCompletionService,
+		logger:                loggerv1,
+	}
 }
 
 func (handlers *ChatCompletionSSEHandlers) ChatCompletion(c *gin.Context) {
@@ -25,7 +35,7 @@ func (handlers *ChatCompletionSSEHandlers) ChatCompletion(c *gin.Context) {
 	}
 
 	//Let the service handle it.
-	result, err := handlers.ChatCompletionProcessor.Process(ctx, genericReq)
+	result, err := handlers.ChatCompletionService.Process(ctx, genericReq)
 	if err != nil {
 		handlers.logger.Error("Error processing chat completion", logger.Error(err))
 		c.JSON(http.StatusBadRequest, httpclient.Fail("请求信息错误", err.Error()))

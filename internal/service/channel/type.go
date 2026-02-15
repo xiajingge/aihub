@@ -9,4 +9,5 @@ import (
 
 type ChannelSelector interface {
 	Select(ctx context.Context, req *domain.Request) ([]*llm.Channel, error)
+	SelectOne(ctx context.Context, req *domain.Request) (*llm.Channel, error)
 }

@@ -33,3 +33,16 @@ func (s *SpecifiedChannelSelector) Select(ctx context.Context, req *domain.Reque
 
 	return []*llm.Channel{channel}, nil
 }
+
+func (s *SpecifiedChannelSelector) SelectOne(ctx context.Context, req *domain.Request) (*llm.Channel, error) {
+	channels, err := s.Select(ctx, req)
+	if err != nil {
+		return nil, err
+	}
+
+	if len(channels) == 0 {
+		return nil, fmt.Errorf("channel %d not found", s.ChannelID.ID)
+	}
+
+	return channels[0], nil
+}
