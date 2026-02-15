@@ -92,6 +92,7 @@ func (s *defaultSSEDecoder) Next() bool {
 	lastEventIDUpdated := false
 
 	for {
+		// 每次读取一行
 		rawLine, readErr := s.reader.ReadString('\n')
 		if readErr != nil && !errors.Is(readErr, io.EOF) {
 			s.err = readErr

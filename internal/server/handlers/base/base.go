@@ -107,7 +107,7 @@ func (h *ChatCompletionSSEHandlers) writeSSEStream(c *gin.Context, stream httpcl
 				cur := stream.Current()
 				c.SSEvent(cur.Type, cur.Data)
 				h.logger.Debug("write stream event", logger.String("event", cur.Type))
-				h.logger.Warn("write stream event", logger.Field{
+				h.logger.Info("write stream event", logger.Field{
 					Key: "event",
 					Val: cur,
 				})

@@ -2,9 +2,15 @@ package pipeline
 
 import (
 	"context"
+	"errors"
+	"fmt"
+	"net"
+	"net/http"
+	"strings"
 	"time"
 
 	"github.com/xiajignge/aihub/internal/domain"
+	"github.com/xiajignge/aihub/internal/domain/llm"
 	"github.com/xiajignge/aihub/internal/domain/transformer"
 	"github.com/xiajignge/aihub/internal/service/channel"
 	"github.com/xiajignge/aihub/internal/service/executor"
@@ -32,6 +38,7 @@ type pipelineParams struct {
 	Executor        executor.Executor
 	logger          logger.LoggerV1
 }
+
 type Option func(*pipeline)
 
 func WithMaxRetries(maxRetries int) Option {
@@ -68,26 +75,72 @@ func NewPipeline(params pipelineParams, opts ...Option) *pipeline {
 		opts...,
 	)
 }
+
 func (p *pipeline) Run(ctx context.Context, request *httpclient.Request) (*Result, error) {
-	// 记录请求日志（含请求体）
 	p.logger.Debug("request received", logger.String("request_body", string(request.Body)))
 
-	// 开始处理请求
 	llmRequest, err := p.Inbound.TransformRequest(ctx, request)
 	if err != nil {
 		return nil, err
 	}
 
-	// 根据inbound来选择outbound
-	channels, err := p.ChannelService.SelectOne(ctx, llmRequest)
+	channels, err := p.ChannelService.Select(ctx, llmRequest)
 	if err != nil {
 		return nil, err
 	}
+	if len(channels) == 0 {
+		return nil, errors.New("channel not found")
+	}
 
-	outbound := channels.Outbound
+	var lastErr error
+	for idx, ch := range channels {
+		requestForChannel, err := buildRequestForChannel(llmRequest, ch)
+		if err != nil {
+			lastErr = err
+			p.logger.Warn("skip channel due to unsupported model mapping",
+				logger.Int("channel_index", idx),
+				logger.String("channel", ch.Name),
+				logger.Error(err),
+			)
+			continue
+		}
 
-	if *llmRequest.Stream {
-		resp, err := p.stream(ctx, llmRequest, outbound)
+		result, err := p.runWithOutbound(ctx, requestForChannel, ch.Outbound)
+		if err == nil {
+			if idx > 0 {
+				p.logger.Info("request succeeded after fallback to next channel",
+					logger.Int("channel_index", idx),
+					logger.String("channel", ch.Name),
+				)
+			}
+			return result, nil
+		}
+
+		lastErr = err
+		p.logger.Warn("channel request failed",
+			logger.Int("channel_index", idx),
+			logger.String("channel", ch.Name),
+			logger.Error(err),
+		)
+
+		if !shouldFallbackToNextChannel(err) {
+			return nil, err
+		}
+	}
+
+	if lastErr != nil {
+		return nil, fmt.Errorf("all channels failed: %w", lastErr)
+	}
+	return nil, errors.New("channel not found")
+}
+
+func (p *pipeline) runWithOutbound(
+	ctx context.Context,
+	request *domain.Request,
+	outbound transformer.Outbound,
+) (*Result, error) {
+	if request.Stream != nil && *request.Stream {
+		resp, err := p.stream(ctx, request, outbound)
 		if err != nil {
 			return nil, err
 		}
@@ -96,43 +149,97 @@ func (p *pipeline) Run(ctx context.Context, request *httpclient.Request) (*Resul
 			Response: nil,
 			SSEvent:  resp,
 		}, nil
-	} else {
-		resp, err := p.notStream(ctx, llmRequest, outbound)
-		if err != nil {
-			return nil, err
-		}
-		return &Result{
-			Stream:   true,
-			Response: resp,
-			SSEvent:  nil,
-		}, nil
 	}
+
+	resp, err := p.notStream(ctx, request, outbound)
+	if err != nil {
+		return nil, err
+	}
+	return &Result{
+		Stream:   false,
+		Response: resp,
+		SSEvent:  nil,
+	}, nil
+}
+
+func buildRequestForChannel(req *domain.Request, ch *llm.Channel) (*domain.Request, error) {
+	resolvedModel, err := ch.ChooseModel(req.Model)
+	if err != nil {
+		return nil, err
+	}
+
+	clonedReq := *req
+	clonedReq.Model = resolvedModel
+	return &clonedReq, nil
+}
+
+func shouldFallbackToNextChannel(err error) bool {
+	if err == nil {
+		return false
+	}
+
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return false
+	}
+	if errors.Is(err, transformer.ErrInvalidRequest) {
+		return false
+	}
+
+	var httpErr *httpclient.Error
+	if errors.As(err, &httpErr) {
+		switch httpErr.StatusCode {
+		case http.StatusUnauthorized, http.StatusForbidden,
+			http.StatusRequestTimeout, http.StatusTooManyRequests,
+			http.StatusInternalServerError, http.StatusBadGateway,
+			http.StatusServiceUnavailable, http.StatusGatewayTimeout:
+			return true
+		default:
+			return false
+		}
+	}
+
+	var netErr net.Error
+	if errors.As(err, &netErr) && (netErr.Timeout() || netErr.Temporary()) {
+		return true
+	}
+
+	msg := strings.ToLower(err.Error())
+	retryableKeywords := []string{
+		"timeout",
+		"connection reset",
+		"connection refused",
+		"broken pipe",
+		"unexpected eof",
+	}
+	for _, keyword := range retryableKeywords {
+		if strings.Contains(msg, keyword) {
+			return true
+		}
+	}
+
+	return false
 }
 
 func (p *pipeline) stream(ctx context.Context, request *domain.Request, outbound transformer.Outbound) (httpclient.Stream[*httpclient.StreamEvent], error) {
-	// 1.将内部的请求转换成特定提供商的请求格式
 	httpReq, err := outbound.TransformRequest(ctx, request)
 	if err != nil {
 		return nil, err
 	}
-	// 2.执行stream http请求
-	outboundStream, err := p.Executor.DoStream(ctx, httpReq)
 
+	outboundStream, err := p.Executor.DoStream(ctx, httpReq)
 	if err != nil {
 		return nil, err
 	}
 
-	// 3. 将特定提供商返回的信息转换为内部响应体
 	llmStream, err := outbound.TransformStream(ctx, outboundStream)
 	if err != nil {
-		p.logger.Error("Failed to transform streaming request", logger.Error(err))
+		p.logger.Error("failed to transform stream response to llm", logger.Error(err))
 		return nil, err
 	}
 
-	// 4. 将内部响应体转换为用户请求对应的响应格式
 	inboundStream, err := p.Inbound.TransformStream(ctx, llmStream)
 	if err != nil {
-		p.logger.Error("Failed to transform streaming request", logger.Error(err))
+		p.logger.Error("failed to transform stream response to inbound format", logger.Error(err))
 		return nil, err
 	}
 
@@ -140,29 +247,25 @@ func (p *pipeline) stream(ctx context.Context, request *domain.Request, outbound
 }
 
 func (p *pipeline) notStream(ctx context.Context, request *domain.Request, outbound transformer.Outbound) (*httpclient.Response, error) {
-	// 1.将内部的请求转换成特定提供商的请求格式
 	httpReq, err := outbound.TransformRequest(ctx, request)
 	if err != nil {
 		return nil, err
 	}
-	// 2.执行 http 请求
-	httpResp, err := p.Executor.Do(ctx, httpReq)
 
+	httpResp, err := p.Executor.Do(ctx, httpReq)
 	if err != nil {
 		return nil, err
 	}
 
-	// 3. 将特定提供商返回的信息转换为内部响应体
 	llmResp, err := outbound.TransformResponse(ctx, httpResp)
 	if err != nil {
-		p.logger.Error("Failed to transform streaming request", logger.Error(err))
+		p.logger.Error("failed to transform non-stream response to llm", logger.Error(err))
 		return nil, err
 	}
 
-	// 4. 将内部响应体转换为用户请求对应的响应格式
 	finalResp, err := p.Inbound.TransformResponse(ctx, llmResp)
 	if err != nil {
-		p.logger.Error("Failed to transform streaming request", logger.Error(err))
+		p.logger.Error("failed to transform non-stream response to inbound format", logger.Error(err))
 		return nil, err
 	}
 

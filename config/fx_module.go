@@ -27,6 +27,7 @@ func NewConfig() (Config, error) {
 	v.SetConfigName("config")
 	v.SetConfigType("yml")
 	v.AddConfigPath(".")
+	v.AddConfigPath("./config")
 	v.AddConfigPath("./conf")
 	v.AddConfigPath("/etc/axonhub/")
 	v.AddConfigPath("$HOME/.axonhub")
@@ -76,7 +77,7 @@ func setDefaults(v *viper.Viper) {
 	// Loggger default
 	v.SetDefault("logger.level", "debug")
 	v.SetDefault("logger.encoding", "json")
-	v.SetDefault("logger.output_Path", []string{"stdout", "./logs/app.log"})
+	v.SetDefault("logger.output_paths", []string{"stdout", "./logs/app.log"})
 
 	// GC defaults
 	v.SetDefault("gc.cron", "0 2 * * *") // Daily at 2:00 AM
